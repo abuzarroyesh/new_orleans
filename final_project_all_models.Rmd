@@ -552,30 +552,6 @@ getTrainPerf(train.knn_reg)
 ```
 
 
-response variable
-- arrest_made
-
-Covariates
-- date
-- time 
-- district
-- subject_age
-- subject_race
-- subject_sex
-- officer_assignment
-- type
-- contraband_found (would be problematic if the outcome is arrest)
-- frisk_performed 
-- search_person
-- search_vehicle
-- search_basis
-- reason_for_stop (but clean the data)
-
-Keep for later
-- vehicle_color, vehicle_model, vehicle_year 
-- outcome (Turn NA into No action taken)
-
-
 
 
 
