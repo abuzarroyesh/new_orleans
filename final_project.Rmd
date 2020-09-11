@@ -1,0 +1,409 @@
+---
+title: "final_project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Importing data and setting aside Test
+```{r, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(ROCR)
+
+new_orleans_file <- "hp256wp2687_la_new_orleans_2019_08_13.csv.zip"
+
+new_orleans <- 
+  read_csv(new_orleans_file)
+
+set.seed(1)
+categories <- sample(1:2, size = nrow(new_orleans), replace = TRUE, prob = c(0.8, 0.2))
+train_uncleaned <- new_orleans[categories == 1,]
+# test_uncleaned <- new_orleans[categories == 2,]
+
+```
+
+
+#Data cleaning and splitting into Train and Valid
+```{r}
+train_cleaned <- 
+  train_uncleaned %>% 
+  filter(year(date) >= 2012) %>% 
+  mutate(
+    time_of_day = 
+      case_when(
+        hour(time) < 6 ~               "night", 
+        hour(time) >= 6 & hour(time) < 12 ~   "morning", 
+        hour(time) >= 12 & hour(time) < 18 ~  "afternoon", 
+        hour(time) >= 18 ~             "evening"
+      )
+  ) %>% 
+  select(
+    arrest_made, date, time_of_day, district, subject_age, subject_race, subject_sex, 
+    officer_assignment, type, contraband_found, frisk_performed, search_person, 
+    search_vehicle, search_basis, reason_for_stop
+  ) %>% 
+  group_by(reason_for_stop) %>% #cleaning out entries with more than one reason for stop
+  filter(n() > 100) %>% 
+  ungroup() %>% 
+  group_by(officer_assignment) %>% #cleaning out entries with more than one officer assignment
+  filter(n() > 5) %>% 
+  ungroup() %>% 
+  mutate(
+    officer_assignment = 
+      recode(
+        officer_assignment, 
+        "FOB" = "Other", 
+        "ISB" = "Other",
+        "MSB" = "Other", 
+        "NCIC" = "Other", 
+        "PIB" = "Other", 
+        "Reserve" = "Other", 
+        "SOD" = "Other", 
+        "Superintendent" = "Other"
+      ), 
+    district = as.factor(district), 
+    contraband_found = as.character(contraband_found), 
+    contraband_found = if_else(is.na(contraband_found), "Not searched", contraband_found), 
+    search_basis = if_else(is.na(search_basis), "Not searched", search_basis), 
+    arrest_made = if_else(arrest_made == TRUE, 1, 0),
+    month = as.factor(month(date)), 
+    weekday = wday(date, label = TRUE), 
+    weekday = if_else(weekday %in% c("Sun", "Sat"), "Weekend", "Weekday")
+  ) %>% 
+  filter_all(~ !is.na(.)) %>% 
+  select(-date)
+
+set.seed(1)
+categories_2 <- sample(1:2, size = nrow(train_cleaned), replace = TRUE, prob = c(0.8, 0.2))
+orleans_train <- train_cleaned[categories_2 == 1,]
+orleans_valid <- train_cleaned[categories_2 == 2,]
+```
+
+
+#Data Exploration
+```{r}
+orleans_train %>% 
+  count(arrest_made, subject_race) %>% 
+  ggplot(aes(arrest_made, subject_race, size = n)) + 
+  geom_point()
+```
+
+
+```{r}
+chi_arrest <- function(dep_variable) {
+  dep_variable = enquo(dep_variable)
+  
+  data_for_chi <- 
+    orleans_train %>% 
+    count(arrest_made, !!dep_variable) %>% 
+    spread(key = arrest_made, value = n) %>% select(-!!dep_variable)
+  
+  chi <- chisq.test(data_for_chi, correct = FALSE)
+  
+  v <- sqrt(chi$statistic / sum(data_for_chi))
+  
+  return(c(round(chi$p.value, 2), round(v, 2), str_c(dep_variable)))
+}
+
+as.tibble(
+  chi_arrest(time_of_day) %>% 
+  rbind(chi_arrest(district)) %>% 
+  rbind(chi_arrest(subject_race)) %>% 
+  rbind(chi_arrest(subject_sex)) %>% 
+  rbind(chi_arrest(officer_assignment)) %>% 
+  rbind(chi_arrest(type)) %>% 
+  rbind(chi_arrest(contraband_found)) %>% 
+  rbind(chi_arrest(frisk_performed)) %>% 
+  rbind(chi_arrest(search_person)) %>% 
+  rbind(chi_arrest(search_vehicle)) %>% 
+  rbind(chi_arrest(search_basis)) %>% 
+  rbind(chi_arrest(reason_for_stop))
+) %>% 
+  select(
+    variable = V4, 
+    p_value = V1, 
+    v = `X-squared`
+  )
+
+```
+
+
+```{r}
+orleans_train %>% 
+  filter(!is.na(contraband_found)) %>% 
+  ggplot(aes(contraband_found, arrest_made)) + 
+  geom_count() + 
+  scale_size(range = c(1, 20), breaks = seq(0, 30000, 10000)) + 
+  labs(
+    x = "Search Basis", 
+    y = "Arrest Made", 
+    title = "Distribution of Arrest Made versus Contraband Found"
+  )
+
+```
+
+
+
+###Boxplots for Age
+```{r}
+age_boxplots <- function(variable) {
+  variable = enquo(variable)
+  
+  orleans_train %>% 
+    filter(!is.na(!!variable)) %>% 
+    ggplot(aes(!!variable, subject_age)) + 
+    geom_boxplot()
+}
+
+# age_boxplots(arrest_made)
+# age_boxplots(time_of_day)
+# age_boxplots(district)
+# age_boxplots(subject_race)
+# age_boxplots(subject_sex)
+# age_boxplots(officer_assignment)
+# age_boxplots(type)
+# age_boxplots(contraband_found)
+# age_boxplots(frisk_performed)
+# age_boxplots(search_person)
+# age_boxplots(search_vehicle)
+# age_boxplots(search_basis)
+# age_boxplots(reason_for_stop)
+
+orleans_train %>% 
+  filter(!is.na(subject_race)) %>% 
+  ggplot(aes(subject_race, subject_age)) + 
+  geom_boxplot() + 
+  labs(
+    x = "Subject Race", 
+    y = "Subject Age", 
+    title = "Distribution of Age by Race"
+  )
+```
+
+#Model Training for arrest_made
+
+###Train and Valid with Logistic Regression
+```{r}
+logit_model <- glm(arrest_made ~ ., family = binomial(link = 'logit'), data = orleans_train)
+
+orleans_valid <- 
+  orleans_valid %>% 
+  mutate(
+    pred = predict(logit_model, .), 
+    pred_clean = as.factor(if_else(pred > 0, 1, 0)),
+    arrest_made = as.factor(arrest_made)
+  )
+  
+  
+Y <- orleans_valid %>% pull(arrest_made)
+pred <- orleans_valid %>% pull(pred_clean)
+
+#Precision
+posPredValue(pred, Y, positive = "1")
+
+#recall
+sensitivity(pred, Y, positive = "1")
+
+
+confusionMatrix(pred, Y)
+```
+
+
+###Cross Validation for Logistic Regression
+```{r}
+ctrl <- trainControl(method = "cv", number = 10, savePredictions = TRUE)
+
+train.logit <- 
+    train(
+      arrest_made ~ ., 
+      data = train_cleaned %>% mutate(arrest_made = as.factor(arrest_made)),
+      method = "glm",
+      family = "binomial",
+      trControl = ctrl, 
+      tuneLength = 5
+    )
+
+# Predict
+pred_cv <- predict(train.logit, train_cleaned)
+
+# Produce confusion matrix from prediction and data used for training
+confusionMatrix(pred_cv, train.logit$trainingData$.outcome, mode = "everything")
+
+getTrainPerf(train.logit)
+```
+
+###AUC and ROC for CV logistic
+```{r}
+labels <- train_cleaned %>% pull(arrest_made)
+
+pred_cv_auc <- prediction(as.integer(pred_cv), as.integer(labels))
+
+perf <- performance(pred_cv_auc, "auc")
+auc <- perf@y.values[[1]]
+auc
+
+perf_roc <- performance(pred_cv_auc, "tpr", "fpr")
+plot(perf_roc)
+```
+
+
+#Predicting Continuous Variable
+
+```{r}
+ctrl <- trainControl(method = "repeatedcv", number = 10, savePredictions = TRUE)
+
+train.ols <- 
+    train(
+      subject_age ~ ., 
+      data = train_cleaned,
+      method = "lm",
+      trControl = ctrl, 
+      tuneLength = 5
+    )
+
+# Predict
+pred_cv_ols <- predict(train.ols, train_cleaned)
+
+train_cleaned %>% 
+  cbind(pred_cv_ols) %>% 
+  mutate(error = (subject_age - pred_cv_ols)^2) %>% 
+  summarize(rmse = sqrt(mean(error, na.rm = TRUE)))
+```
+
+###Lasso 
+```{r}
+variables_for_dummy <- 
+  c("time_of_day", "district", "subject_race", "subject_sex", "officer_assignment", 
+    "type", "contraband_found", "frisk_performed", "search_person", "search_vehicle", 
+    "search_basis", "reason_for_stop", "month", "weekday", "arrest_made"
+  )
+
+train_cleaned_dummified <- 
+  fastDummies::dummy_cols(
+    train_cleaned, 
+    select_columns = variables_for_dummy, 
+    remove_first_dummy = TRUE
+  ) %>% 
+  select(-variables_for_dummy)
+
+train_cleaned_dumm_reg <- 
+  train_cleaned_dummified %>% 
+  mutate_at(vars(-subject_age), ~ scale(.))
+```
+
+```{r}
+train.lasso <- 
+    train(
+      subject_age ~ ., 
+      data = train_cleaned_dumm_reg,
+      method = "glmnet",
+      trControl = ctrl,
+      tuneGrid = expand.grid(alpha = 1, lambda = seq(0.01, 2, by = 0.1))
+    )
+
+# Predict
+pred_cv_lasso <- predict(train.lasso, train_cleaned_dumm_reg)
+
+train_cleaned %>% 
+  cbind(pred_cv_lasso) %>% 
+  mutate(error = (subject_age - pred_cv_lasso)^2) %>% 
+  summarize(rmse = sqrt(mean(error, na.rm = TRUE)))
+```
+
+###Ridge
+```{r}
+train.ridge <- 
+    train(
+      subject_age ~ ., 
+      data = train_cleaned_dumm_reg,
+      method = "glmnet",
+      trControl = ctrl,
+      tuneGrid = expand.grid(alpha = 0, lambda = seq(0.001, 2, by = 0.01))
+    )
+
+# Predict
+pred_cv_ridge <- predict(train.ridge, train_cleaned_dumm_reg)
+
+train_cleaned %>% 
+  cbind(pred_cv_ridge) %>% 
+  mutate(error = (subject_age - pred_cv_ridge)^2) %>% 
+  summarize(rmse = sqrt(mean(error, na.rm = TRUE)))
+```
+
+###Decision Tree 
+```{r}
+train.tree <- 
+    train(
+      subject_age ~ ., 
+      data = train_cleaned,
+      method = "rpart",
+      trControl = ctrl
+    )
+
+# Predict
+pred_cv_tree <- predict(train.tree, train_cleaned)
+
+train_cleaned %>% 
+  cbind(pred_cv_tree) %>% 
+  mutate(error = (subject_age - pred_cv_tree)^2) %>% 
+  summarize(rmse = sqrt(mean(error, na.rm = TRUE)))
+```
+
+
+###Random Forest
+```{r}
+train.forest <- 
+    train(
+      subject_age ~ ., 
+      data = train_cleaned,
+      method = "rf", #Try ranger
+      trControl = ctrl
+    )
+
+# Predict
+pred_cv_forest <- predict(train.forest, train_cleaned)
+
+train_cleaned %>% 
+  cbind(pred_cv_forest) %>% 
+  mutate(error = (subject_age - pred_cv_forest)^2) %>% 
+  summarize(rmse = sqrt(mean(error, na.rm = TRUE)))
+```
+
+
+
+
+
+response variable
+- arrest_made
+
+Covariates
+- date
+- time 
+- district
+- subject_age
+- subject_race
+- subject_sex
+- officer_assignment
+- type
+- contraband_found (would be problematic if the outcome is arrest)
+- frisk_performed 
+- search_person
+- search_vehicle
+- search_basis
+- reason_for_stop (but clean the data)
+
+Keep for later
+- vehicle_color, vehicle_model, vehicle_year 
+- outcome (Turn NA into No action taken)
+
+
+
+
+
+
+

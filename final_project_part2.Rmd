@@ -1,0 +1,432 @@
+---
+title: "final_project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Importing data and setting aside Test
+```{r, message=FALSE}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(ROCR)
+library(boot)
+
+new_orleans_file <- "hp256wp2687_la_new_orleans_2019_08_13.csv.zip"
+
+new_orleans <- 
+  read_csv(new_orleans_file)
+
+set.seed(1)
+categories <- sample(1:2, size = nrow(new_orleans), replace = TRUE, prob = c(0.8, 0.2))
+train_uncleaned <- new_orleans[categories == 1,]
+test_uncleaned <- new_orleans[categories == 2,]
+```
+
+
+#Data cleaning for Train set
+```{r}
+train_cleaned <- 
+  train_uncleaned %>% 
+  filter(year(date) >= 2012) %>% 
+  mutate(
+    time_of_day = 
+      case_when(
+        hour(time) < 6 ~               "night", 
+        hour(time) >= 6 & hour(time) < 12 ~   "morning", 
+        hour(time) >= 12 & hour(time) < 18 ~  "afternoon", 
+        hour(time) >= 18 ~             "evening"
+      )
+  ) %>% 
+  select(
+    arrest_made, date, time_of_day, district, subject_age, subject_race, subject_sex, 
+    officer_assignment, type, contraband_found, frisk_performed, search_person, 
+    search_vehicle, search_basis, reason_for_stop
+  ) %>% 
+  group_by(reason_for_stop) %>% #cleaning out entries with more than one reason for stop
+  filter(n() > 100) %>% 
+  ungroup() %>% 
+  group_by(officer_assignment) %>% #cleaning out entries with more than one officer assignment
+  filter(n() > 5) %>% 
+  ungroup() %>% 
+  mutate(
+    officer_assignment = 
+      recode(
+        officer_assignment, 
+        "FOB" = "Other", 
+        "ISB" = "Other",
+        "MSB" = "Other", 
+        "NCIC" = "Other", 
+        "PIB" = "Other", 
+        "Reserve" = "Other", 
+        "SOD" = "Other", 
+        "Superintendent" = "Other"
+      ), 
+    district = as.factor(district), 
+    contraband_found = as.character(contraband_found), 
+    contraband_found = if_else(is.na(contraband_found), "Not searched", contraband_found), 
+    search_basis = if_else(is.na(search_basis), "Not searched", search_basis), 
+    arrest_made = if_else(arrest_made == TRUE, 1, 0),
+    month = as.factor(month(date)), 
+    weekday = wday(date, label = TRUE), 
+    weekday = if_else(weekday %in% c("Sun", "Sat"), "Weekend", "Weekday")
+  ) %>% 
+  filter_all(~ !is.na(.)) %>% 
+  select(-date)
+
+set.seed(1)
+categories_2 <- sample(1:2, size = nrow(train_cleaned), replace = TRUE, prob = c(0.8, 0.2))
+orleans_train <- train_cleaned[categories_2 == 1,]
+orleans_valid <- train_cleaned[categories_2 == 2,]
+```
+
+###Best Regression Model: Elastic Net with All Interactions
+
+```{r}
+variables_for_dummy <- 
+  c("time_of_day", "district", "subject_race", "subject_sex", "officer_assignment", 
+    "type", "contraband_found", "frisk_performed", "search_person", "search_vehicle", 
+    "search_basis", "reason_for_stop", "month", "weekday", "arrest_made"
+  )
+
+orleans_train_dummified <- 
+  fastDummies::dummy_cols(
+    orleans_train, 
+    select_columns = variables_for_dummy, 
+    remove_most_frequent_dummy = TRUE
+  ) %>% 
+  select(-variables_for_dummy) %>% 
+  mutate_at(vars(-subject_age), ~ scale(.))
+
+ctrl <- trainControl(method = "none", number = 10, savePredictions = TRUE)
+
+train.elastic <-
+    train(
+      subject_age ~ . + .:.,
+      data = orleans_train_dummified,
+      method = "glmnet",
+      trControl = ctrl
+)
+```
+
+###Best Classification Model: Base Logistic
+
+```{r}
+logit_model <- 
+  glm(arrest_made ~ . , family = binomial(link = 'logit'), data = orleans_train)
+
+confint(logit_model)
+
+```
+
+###Base logisitic with gender interactions
+```{r}
+logit_model_inter <- 
+  glm(arrest_made ~ . + subject_sex * . , family = binomial(link = 'logit'), data = orleans_train)
+
+summary(logit_model_inter)
+```
+
+
+
+
+###Data cleaning for test set
+```{r}
+test_cleaned <- 
+  test_uncleaned %>% 
+  filter(year(date) >= 2012) %>% 
+  mutate(
+    time_of_day = 
+      case_when(
+        hour(time) < 6 ~               "night", 
+        hour(time) >= 6 & hour(time) < 12 ~   "morning", 
+        hour(time) >= 12 & hour(time) < 18 ~  "afternoon", 
+        hour(time) >= 18 ~             "evening"
+      )
+  ) %>% 
+  select(
+    arrest_made, date, time_of_day, district, subject_age, subject_race, subject_sex, 
+    officer_assignment, type, contraband_found, frisk_performed, search_person, 
+    search_vehicle, search_basis, reason_for_stop
+  ) %>% 
+  group_by(reason_for_stop) %>% #cleaning out entries with more than one reason for stop
+  filter(n() > 100) %>%
+  ungroup() %>%
+  group_by(officer_assignment) %>% #cleaning out entries with more than one officer assignment
+  filter(n() > 5) %>%
+  ungroup() %>%
+  mutate(
+    officer_assignment = 
+      recode(
+        officer_assignment, 
+        "FOB" = "Other", 
+        "ISB" = "Other",
+        "MSB" = "Other", 
+        "NCIC" = "Other", 
+        "PIB" = "Other", 
+        "Reserve" = "Other", 
+        "SOD" = "Other", 
+        "Superintendent" = "Other"
+      ), 
+    district = as.factor(district), 
+    contraband_found = as.character(contraband_found), 
+    contraband_found = if_else(is.na(contraband_found), "Not searched", contraband_found), 
+    search_basis = if_else(is.na(search_basis), "Not searched", search_basis), 
+    arrest_made = if_else(arrest_made == TRUE, 1, 0),
+    month = as.factor(month(date)), 
+    weekday = wday(date, label = TRUE), 
+    weekday = if_else(weekday %in% c("Sun", "Sat"), "Weekend", "Weekday")
+  ) %>% 
+  filter_all(~ !is.na(.)) %>%
+  select(-date)
+```
+
+
+###Running the regression model on the test set
+```{r}
+orleans_test_dummified <- 
+  fastDummies::dummy_cols(
+    test_cleaned, 
+    select_columns = variables_for_dummy, 
+    remove_most_frequent_dummy = FALSE
+  ) %>% 
+  select(-variables_for_dummy) %>% 
+  mutate_at(vars(-subject_age), ~ scale(.)) %>% 
+  select(
+    -c(
+      time_of_day_evening, district_3, subject_race_black, subject_sex_male, 
+      `officer_assignment_3rd  District`, type_vehicular, 
+      `contraband_found_Not searched`, frisk_performed_FALSE, search_person_FALSE, 
+      search_vehicle_FALSE, `search_basis_Not searched`, 
+      `reason_for_stop_TRAFFIC VIOLATION`, month_3, weekday_Weekday, 
+      arrest_made_0
+    )
+  )
+
+# Predict
+pred_cv_elastic <- predict(train.elastic, orleans_test_dummified)
+
+
+orleans_test_dummified %>%
+  cbind(pred_cv_elastic) %>%
+  mutate(error = (subject_age - pred_cv_elastic) ^ 2) %>% 
+  summarize(rmse = sqrt(mean(error, na.rm = TRUE)))
+```
+
+
+###Running the classification model on the test set 
+```{r}
+pred <-
+  test_cleaned %>%
+  mutate(
+    pred = predict(logit_model, .),
+    pred_clean = as.factor(if_else(pred > 0, 1, 0)), arrest_made = as.factor(arrest_made)
+  ) %>%
+  pull(pred_clean)
+
+
+Y <- 
+  test_cleaned %>% 
+  mutate(arrest_made = as.factor(arrest_made)) %>%  
+  pull(arrest_made)
+
+confusionMatrix(pred, Y)
+
+pred_train <- 
+  orleans_train %>%
+  mutate(
+    pred = predict(logit_model, .),
+    pred_clean = as.factor(if_else(pred > 0, 1, 0)), arrest_made = as.factor(arrest_made)
+  ) %>%
+  pull(pred_clean)
+
+Y_train <- 
+  orleans_train %>% 
+  mutate(arrest_made = as.factor(arrest_made)) %>%  
+  pull(arrest_made)
+
+confusionMatrix(pred_train, Y_train)
+
+pred_valid <- 
+  orleans_valid %>%
+  mutate(
+    pred = predict(logit_model, .),
+    pred_clean = as.factor(if_else(pred > 0, 1, 0)), arrest_made = as.factor(arrest_made)
+  ) %>%
+  pull(pred_clean)
+
+Y_valid <- 
+  orleans_valid %>% 
+  mutate(arrest_made = as.factor(arrest_made)) %>%  
+  pull(arrest_made)
+
+confusionMatrix(pred_valid, Y_valid)
+```
+
+
+
+#PART TWO
+
+```{r}
+summary(logit_model)
+```
+
+###Running Model on the test set
+```{r}
+logit_model_test <- 
+  glm(arrest_made ~ ., family = binomial(link = 'logit'), data = test_cleaned)
+
+summary(logit_model_test)
+
+
+```
+
+
+
+###Bootstrapping
+
+```{r}
+##Manual Attempt
+# variables <- names(sample_logit$coefficients)
+# 
+# variables <-
+#   variables[!variables %in% c("search_basisNot searched", "reason_for_stopTRAFFIC VIOLATION")]
+# 
+# bootstrap_df <- as_tibble(matrix(ncol = 49, nrow = 100), row.names = variables)
+# 
+# colnames(bootstrap_df) = variables
+# 
+# ptm <- proc.time()
+# 
+# set.seed(1)
+# for (i in 1:100) {
+#   sample_data <- orleans_train %>% sample_n(50000, replace = TRUE)
+# 
+#   sample_logit <- glm(arrest_made ~ ., family = binomial(link = 'logit'), data = sample_data)
+# 
+#   bootstrap_df[i, ] <- summary(sample_logit)$coefficients[, 1]
+# }
+# 
+# proc.time() - ptm
+# 
+# bootstrap_df %>% 
+#   summarize_all(sd) %>% 
+#   gather(key = key, value = se) 
+# 
+# 
+# bootstrap_df %>% 
+#   summarize_all(quantile(0.025, 0.975))
+```
+
+```{r}
+##Using boot library
+library(boot)
+
+# Function for boot
+boot_coef <- function(formula, data, indices) {
+  d <- data[indices,]
+  fit <- glm(formula, family = binomial(link = 'logit'), data = d)
+  return(summary(fit)$coefficients[, 1]) 
+}
+
+ptm <- proc.time()
+
+# Bootstrap with 1000 replications and estimate CI's
+results <- 
+  boot(
+    data = orleans_train, 
+    statistic = boot_coef, 
+    R = 1000, 
+    formula = arrest_made ~ .
+  ) 
+
+proc.time() - ptm
+
+boot_ci <- tibble(
+  conf_level = rep(NA, 49), 
+  perc_lower = rep(NA, 49), 
+  perc_upper = rep(NA, 49),
+  norm_lower = rep(NA, 49), 
+  norm_upper = rep(NA, 49),
+  basic_lower = rep(NA, 49), 
+  basic_upper = rep(NA, 49)
+)
+
+for (i in 1:49) {
+  conf_int <- boot.ci(results, type = c("perc", "norm", "basic"), index = i)
+  
+  boot_ci$conf_level[i] <- conf_int$percent[,1]
+  boot_ci$perc_lower[i] <- conf_int$percent[,4]
+  boot_ci$perc_upper[i] <- conf_int$percent[,5]
+  boot_ci$norm_lower[i] <- conf_int$normal[,2]
+  boot_ci$norm_upper[i] <- conf_int$normal[,3]
+  boot_ci$basic_lower[i] <- conf_int$basic[,4]
+  boot_ci$basic_upper[i] <- conf_int$basic[,5]
+}
+
+
+
+
+```
+
+
+
+```{r}
+readxl::read_xlsx("boot_ci_calculations.xlsx", sheet = "Sheet2") %>% 
+  ggplot() + 
+  geom_segment(
+    aes(
+      x = lower,
+      xend = upper, 
+      y = variable, 
+      yend = variable, 
+      color = method
+    ),
+    size = 3, 
+    alpha = 0.3
+  ) + 
+  geom_point(
+    data = . %>% gather(key = key, value = value, -variable, -method), 
+    aes(value, variable, color = method), 
+    size = 3
+  ) + 
+  labs(
+    x = "Confidence Interval", 
+    y = "Covariate", 
+    title = "Difference in Standard Regression C.I. and Bootstrap C.I.*",
+    caption = "*for select variables"
+  ) + 
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+```
+
+
+```{r}
+#p-value correction with Bonferroni and BH
+data = csv_read("boot_ci_calculations.corrected")
+
+data$p_train_bonferroni = p.adjust(data[,2], "bonferroni")
+data$p_train_BH = p.adjust(data[,2], "BH")
+
+indx_sign_bonf = which(data$p_train_bonferroni<0.05)
+indx_sign_BH = which(data$p_train_BH<0.05)
+
+df_sign_bonf = data[indx_sign_bonf,]
+df_sign_BH = data[indx_sign_BH,]
+df_nonsign_bonf = data[-indx_sign_bonf,]
+df_nonsign_BH = data[-indx_sign_BH,]
+```
+
+
+
+
+
+
+
+
